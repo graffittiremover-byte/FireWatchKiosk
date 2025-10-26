@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fire Watch — Kiosk Display</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Ctext y='50%25' x='50%25' dy='.35em' text-anchor='middle'%3E🔥%3C/text%3E%3C/svg%3E">
+  <style>
+    :root{
+      --idle1:#0b1020; --idle2:#0f172a;
+      --pend1:#221705; --pend2:#3b2306;
+      --act1:#06210e; --act2:#0c3b1a;
+      --ink:#e5e7eb; --muted:#a9b1c6;
+      --ok:#16a34a; --warn:#f59e0b; --mut:#475569;
+      --flash-amber: rgba(245,158,11,.9);
+      --flash-red: rgba(220,38,38,.95);
+    }
+    html,body{height:100%}
+    body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);
+      display:flex;align-items:center;justify-content:center;padding:24px;
+      background:linear-gradient(180deg,var(--idle1),var(--idle2)); transition:background 300ms}
+    body.theme-idle{background:linear-gradient(180deg,var(--idle1),var(--idle2))}
+    body.theme-pending{background:linear-gradient(180deg,var(--pend1),var(--pend2))}
+    body.theme-active{background:linear-gradient(180deg,var(--act1),var(--act2))}
+
+    /* Flashing like main app */
+    @keyframes flashAmber {0%{box-shadow:0 0 0 0 rgba(245,158,11,.6)}50%{box-shadow:0 0 42px 10px var(--flash-amber)}100%{box-shadow:0 0 0 0 rgba(245,158,11,.6)}}
+    @keyframes flashRed   {0%{box-shadow:0 0 0 0 rgba(220,38,38,.55)}50%{box-shadow:0 0 42px 10px var(--flash-red)}100%{box-shadow:0 0 0 0 rgba(220,38,38,.55)}}
+    body.flash-pending .card{animation:flashAmber 1s ease-in-out infinite}
+    body.flash-overdue .card{animation:flashRed 1s ease-in-out infinite}
+
+    .card{width:min(1100px,96vw); background:linear-gradient(180deg,#121a35,#0f152a);
+      border:1px solid rgba(148,163,184,.18); border-radius:22px; padding:32px;
+      box-shadow:0 25px 60px rgba(0,0,0,.45)}
+    .top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .title{font-weight:900; letter-spacing:.3px; font-size:28px}
+    .status{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:14px;
+      border:1px solid rgba(148,163,184,.2);background:#0b1224}
+    .dot{width:14px;height:14px;border-radius:999px;background:var(--mut)}
+    .s-idle{background:var(--mut)}
+    .s-pending{background:var(--warn)}
+    .s-active{background:var(--ok)}
+    .big{font-size:120px; font-weight:900; margin:8px 0 4px}
+    .line{font-size:24px; color:var(--muted)}
+    .pill{font-size:12px;color:#cbd5e1;background:#0b1224;border:1px solid rgba(148,163,184,.2);
+      padding:6px 10px;border-radius:999px; display:inline-flex; gap:8px; align-items:center}
+    #alert{display:none; margin-top:12px; padding:12px 14px; border-radius:14px;
+      background:linear-gradient(180deg,#3b2306,#231703); border:1px solid rgba(255,255,255,.2); font-weight:700}
+    #fatal{display:none;margin-top:12px;padding:12px 14px;border-radius:14px;
+      background:#431407;border:1px solid rgba(255,255,255,.25)}
+    @media (max-width:900px){ .big{font-size:72px} }
+  </style>
+</head>
+<body class="theme-idle">
+  <main class="card">
+    <div class="top">
+      <div class="title">Fire Watch — Kiosk Display</div>
+      <div class="status"><div id="dot" class="dot s-idle"></div><div id="statusTxt">Idle</div></div>
+    </div>
+
+    <div id="alert">⚠️ Pending acknowledgement — please acknowledge.</div>
+    <div id="fatal">❌ Failed to load Supabase client. Check network/CDN.</div>
+
+    <div style="margin-top:8px">
+      <div id="big" class="big">IDLE</div>
+      <div id="until" class="line">Planned until —</div>
+      <div id="who" class="line">—</div>
+      <div id="since" class="line">—</div>
+      <div id="countdown" class="line">—</div>
+    </div>
+
+    <div style="margin-top:18px; display:flex; gap:10px; flex-wrap:wrap">
+      <div class="pill">Timezone: America/Toronto</div>
+      <div class="pill">Backend: <span id="backend">loading…</span></div>
+      <div class="pill">Last update: <span id="lastUpdate">—</span></div>
+    </div>
+  </main>
+
+  <script>
+    /* ==== Your Supabase project ==== */
+    const SUPABASE_URL = "https://uuoyhuxaklbyvfayilcy.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV1b3lodXhha2xieXZmYXlpbGN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzNzA0NzEsImV4cCI6MjA3Njk0NjQ3MX0.Ahdw5G3woFlLjMjTWuS8uqdQYcB7KnDL_MCaFYKkMIs";
+    const tz = 'America/Toronto';
+
+    /* ==== Behavior ==== */
+    const ESCALATE_MIN = 5;         // start alarm after 5 minutes pending
+    const ALARM_INTERVAL_MS = 2000; // beep every 2s (continuous until ack/cancel/end)
+    const S = { IDLE:'IDLE', PENDING:'PENDING_ACK', ACTIVE:'ACTIVE' };
+
+    let sb, current = null, alarmInterval = null;
+
+    /* ==== Utils ==== */
+    const $ = id => document.getElementById(id);
+    const fmt = ts => ts ? new Date(ts).toLocaleString('en-CA',{ timeZone: tz }) : '—';
+    function humanHM(msLeft){
+      const totalM = Math.max(0, Math.ceil(msLeft/60000));
+      const h = Math.floor(totalM/60);
+      const m = totalM % 60;
+      return `${h}h ${String(m).padStart(2,'0')}m`;
+    }
+
+    /* ==== Alarm (for pending) ==== */
+    function beep(duration=300, frequency=880, volume=0.45){
+      try{
+        const ctx = new (window.AudioContext||window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.value = frequency; gain.gain.value = volume;
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(); setTimeout(()=>{ osc.stop(); ctx.close(); }, duration);
+      }catch(_){}
+    }
+    function startAlarm(){
+      if (alarmInterval) return;
+      beep(420, 1000, 0.6);
+      alarmInterval = setInterval(()=> beep(350, 980, 0.5), ALARM_INTERVAL_MS);
+      $('alert').style.display = 'block';
+    }
+    function stopAlarm(){
+      if (alarmInterval){ clearInterval(alarmInterval); alarmInterval = null; }
+      $('alert').style.display = 'none';
+    }
+
+    /* ==== Flash helpers ==== */
+    function setFlash({ pending=false, overdue=false }={}){
+      document.body.classList.toggle('flash-pending', !!pending);
+      document.body.classList.toggle('flash-overdue', !!overdue);
+    }
+
+    /* ==== Render ==== */
+    function setTheme(s){
+      document.body.classList.remove('theme-idle','theme-pending','theme-active','flash-pending','flash-overdue');
+      if(s===S.ACTIVE) document.body.classList.add('theme-active');
+      else if(s===S.PENDING) document.body.classList.add('theme-pending');
+      else document.body.classList.add('theme-idle');
+    }
+    function render(row){
+      const status = row ? row.status : S.IDLE;
+      setTheme(status);
+
+      // compute overdue if ACTIVE
+      let isOverdue = false;
+      if (status===S.ACTIVE && row?.planned_until) {
+        isOverdue = (new Date(row.planned_until).getTime() < Date.now());
+      }
+
+      // status pills/text
+      $('dot').className = 'dot ' + (status===S.ACTIVE?'s-active':status===S.PENDING?'s-pending':'s-idle');
+      $('statusTxt').textContent =
+        status===S.ACTIVE ? (isOverdue ? 'Active — Past Due' : 'Active')
+        : status===S.PENDING ? 'Pending Acknowledgement'
+        : 'Idle';
+
+      // BIG header
+      $('big').textContent =
+        status===S.ACTIVE ? (isOverdue ? 'ACTIVE — PAST DUE' : 'ACTIVE')
+        : status===S.PENDING ? 'PENDING ACK'
+        : 'IDLE';
+
+      $('until').textContent = 'Planned until ' + (fmt(row?.planned_until) || '—');
+      $('who').textContent = row ? `By ${row.started_by_role || '—'} — ${row.started_by_name || '—'}` : '—';
+      $('since').textContent = row?.started_at ? `Started ${fmt(row.started_at)}` : '—';
+      $('lastUpdate').textContent = new Date().toLocaleString('en-CA',{ timeZone: tz });
+
+      // flashing + audio
+      if(status===S.PENDING){
+        setFlash({ pending:true, overdue:false });
+        const at = row?.ext_pending ? (new Date(row.ext_requested_at||row.started_at||Date.now())).getTime()
+                                    : (new Date(row?.started_at||Date.now())).getTime();
+        const ageMin = Math.floor((Date.now() - at)/60000);
+        if(ageMin >= ESCALATE_MIN) startAlarm(); else stopAlarm();
+        $('countdown').textContent = 'Awaiting acknowledgement…';
+      } else if(status===S.ACTIVE){
+        stopAlarm();
+        const now = Date.now();
+        if(row?.planned_until){
+          const until = new Date(row.planned_until).getTime();
+          if (now <= until){
+            const left = until - now;
+            $('countdown').textContent = `Time left: ${humanHM(left)}`;
+            setFlash({ pending:false, overdue:false });
+          } else {
+            const overdue = now - until;
+            $('countdown').textContent = `Overdue by ${humanHM(overdue)}`;
+            setFlash({ pending:false, overdue:true });
+          }
+        } else {
+          $('countdown').textContent = '—';
+          setFlash({ pending:false, overdue:false });
+        }
+      } else {
+        stopAlarm();
+        setFlash({});
+        $('countdown').textContent = '—';
+      }
+    }
+    function tick(){ if(current) render(current); }
+
+    /* ==== Data ==== */
+    async function fetchCurrent(){
+      const { data, error } = await sb.from('fire_watches')
+        .select('*').in('status',['PENDING_ACK','ACTIVE'])
+        .order('started_at',{ ascending:false }).limit(1);
+      if(error){ console.error('fetchCurrent', error); return null; }
+      return data?.[0] || null;
+    }
+    function subscribeRealtime(){
+      sb.channel('display_fire_watches')
+        .on('postgres_changes', { event:'*', schema:'public', table:'fire_watches' }, async ()=>{
+          current = await fetchCurrent();
+          render(current);
+        })
+        .subscribe();
+    }
+
+    /* ==== Robust loader for Supabase ==== */
+    async function loadSupabase() {
+      try {
+        const mod = await import('https://esm.sh/@supabase/supabase-js@2');
+        if (mod?.createClient) return { type:'esm', createClient: mod.createClient };
+      } catch (e) { console.warn('ESM load failed:', e?.message || e); }
+
+      await new Promise(resolve => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/supabase.min.js';
+        s.defer = true; s.onload = resolve; s.onerror = resolve;
+        document.head.appendChild(s);
+      });
+      if (window.supabase?.createClient) return { type:'umd', createClient: window.supabase.createClient };
+
+      await new Promise(resolve => {
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/@supabase/supabase-js@2/dist/supabase.min.js';
+        s.defer = true; s.onload = resolve; s.onerror = resolve;
+        document.head.appendChild(s);
+      });
+      if (window.supabase?.createClient) return { type:'umd', createClient: window.supabase.createClient };
+      return null;
+    }
+
+    /* ==== Boot ==== */
+    (async function init(){
+      const loader = await loadSupabase();
+      if (!loader) {
+        $('backend').textContent = 'failed';
+        $('fatal').style.display = 'block';
+        console.error('Could not load Supabase client from any CDN.');
+        return;
+      }
+      sb = loader.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+      const { error } = await sb.from('fire_watches').select('id', { head:true, count:'exact' });
+      $('backend').textContent = error ? 'connection error' : 'connected';
+      if(error) console.error(error);
+
+      current = await fetchCurrent();
+      render(current);
+      subscribeRealtime();
+      setInterval(tick, 1000); // updates countdown/overdue every second
+    })();
+  </script>
+</body>
+</html>
